@@ -417,12 +417,11 @@
 	<div class="app">
 		<aside class="sidebar">
 			<div class="logo">
-				<h1 class="logo-title">OpenCloud Style UI</h1>
 				<div class="logo-sub">Flask WebDAV</div>
 			</div>
 			<nav class="nav">
 				<a class="nav-item active" href="{{ url_for('ui_list', subpath=current_path) }}">Files</a>
-				<a class="nav-item" href="{{ webdav_base }}" target="_blank" rel="noopener">WebDAV Root</a>
+				<a class="nav-item" href="{{ webdav_base }}">WebDAV Root</a>
 				<a class="nav-item" href="{{ url_for('ui_logoff') }}">Log off</a>
 			</nav>
 			<div class="sidebar-meta">
@@ -434,7 +433,6 @@
 		<main class="main">
 			<header class="topbar">
 				<div>
-					<h2 class="page-title">Personal Files</h2>
 					<div class="page-sub">Browse, upload and manage your WebDAV storage</div>
 				</div>
 				<div class="top-actions">
@@ -552,6 +550,7 @@
 			const resultsBox = document.getElementById("uploadResults");
 			const resultsList = document.getElementById("uploadResultsList");
 			const themeToggle = document.getElementById("themeToggle");
+			const uploadCheckUrl = "{{ url_for('ui_upload_check') }}";
 
 			if (!form || !dropzone || !status || !fileInput || !folderInput || !resultsBox || !resultsList) {
 				return;
@@ -619,6 +618,70 @@
 				line.textContent = "Uploading " + total + " item(s)...";
 				resultsList.appendChild(line);
 				return true;
+			}
+
+			function collectUploadDescriptors() {
+				const descriptors = [];
+
+				for (const file of Array.from(fileInput.files || [])) {
+					descriptors.push({
+						path: file.name,
+						size: file.size,
+						modified_ms: file.lastModified,
+						preserve_tree: false
+					});
+				}
+
+				for (const file of Array.from(folderInput.files || [])) {
+					const path = file.webkitRelativePath || file.name;
+					descriptors.push({
+						path: path,
+						size: file.size,
+						modified_ms: file.lastModified,
+						preserve_tree: true
+					});
+				}
+
+				for (const file of droppedFiles) {
+					const hasTreePath = !!file.webkitRelativePath;
+					descriptors.push({
+						path: hasTreePath ? file.webkitRelativePath : file.name,
+						size: file.size,
+						modified_ms: file.lastModified,
+						preserve_tree: hasTreePath
+					});
+				}
+
+				return descriptors;
+			}
+
+			async function checkOverwriteConflicts(descriptors) {
+				const currentPath = (form.querySelector('input[name="current_path"]') || {}).value || "";
+				const response = await fetch(uploadCheckUrl, {
+					method: "POST",
+					credentials: "same-origin",
+					headers: {
+						"Content-Type": "application/json",
+						"X-Requested-With": "XMLHttpRequest",
+						"Accept": "application/json"
+					},
+					body: JSON.stringify({
+						current_path: currentPath,
+						files: descriptors
+					})
+				});
+
+				if (!response.ok) {
+					throw new Error("Precheck failed with status " + response.status);
+				}
+				const data = await response.json();
+				if (!data.ok) {
+					throw new Error(data.summary || "Precheck failed");
+				}
+				return {
+					ok: !!data.ok,
+					conflicts: Array.isArray(data.conflicts) ? data.conflicts : []
+				};
 			}
 
 			function addFile(file, relativePath) {
@@ -707,12 +770,43 @@
 				await ingestDrop(e.dataTransfer);
 			});
 
-			form.addEventListener("submit", (e) => {
+			form.addEventListener("submit", async (e) => {
 				e.preventDefault();
+
+				const descriptors = collectUploadDescriptors();
+				if (!descriptors.length) {
+					showResults([], "No files selected.", true);
+					return;
+				}
+
+				try {
+					const check = await checkOverwriteConflicts(descriptors);
+					if (check.ok && check.conflicts.length > 0) {
+						const preview = check.conflicts.slice(0, 6).map((c) => {
+							const marker = c.same_metadata ? "same size+mtime" : "different size/mtime";
+							return "- " + c.saved_as + " (" + marker + ")";
+						}).join("\n");
+						const extra = check.conflicts.length > 6 ? "\n- ..." : "";
+						const message =
+							"Some files already exist with the same name:\n\n" +
+							preview + extra +
+							"\n\nProceed to overwrite these files?";
+						const proceed = window.confirm(message);
+						if (!proceed) {
+							showResults([], "Upload cancelled by user.", true);
+							return;
+						}
+					}
+				} catch (err) {
+					showResults([], "Could not verify existing files before upload.", true);
+					return;
+				}
+
 				if (!showPendingSummary()) {
 					return;
 				}
 				const fd = new FormData(form);
+				fd.append("__mtime_payload", JSON.stringify(descriptors));
 				for (const file of droppedFiles) {
 					if (file.webkitRelativePath) {
 						fd.append("folder_files", file, file.webkitRelativePath);

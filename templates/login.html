@@ -147,10 +147,9 @@
 <body>
 	<div class="card">
 		<div class="card-head">
-			<span class="badge">OpenCloud Style UI</span>
+			<span class="badge">Flask WebDAV</span>
 			<button class="theme-toggle" id="themeToggle" type="button">Dark mode</button>
 		</div>
-		<h1>Web UI Sign In</h1>
 		<p>Sign in using the same server credentials used for WebDAV.</p>
 		<form method="post" action="{{ url_for('ui_login_post') }}">
 			<input type="hidden" name="next" value="{{ next_path }}">

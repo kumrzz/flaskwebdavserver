@@ -1,6 +1,7 @@
 import base64
 import datetime as dt
 import io
+import json
 import mimetypes
 import os
 import posixpath
@@ -273,7 +274,58 @@ def _wants_json_upload_response() -> bool:
 		return "application/json" in accept or requested_with == "XMLHttpRequest"
 
 
-def _store_uploaded_file(upload, target_dir: Path, rel_path: str, preserve_tree: bool) -> dict:
+def _extract_mtime_lookup() -> dict[tuple[bool, str], int]:
+		raw_payload = request.form.get("__mtime_payload", "")
+		if not raw_payload:
+				return {}
+
+		try:
+				data = json.loads(raw_payload)
+		except Exception:
+				return {}
+
+		if not isinstance(data, list):
+				return {}
+
+		lookup: dict[tuple[bool, str], int] = {}
+		for item in data:
+				if not isinstance(item, dict):
+						continue
+
+				path = str(item.get("path", "") or "")
+				preserve_tree = bool(item.get("preserve_tree", False))
+				if not path:
+						continue
+
+				try:
+						safe_name = _sanitize_upload_filename(path, preserve_tree=preserve_tree)
+				except Exception:
+						continue
+
+				try:
+						modified_ms = int(item.get("modified_ms", -1))
+				except Exception:
+						continue
+
+				if modified_ms >= 0:
+						lookup[(preserve_tree, safe_name)] = modified_ms
+
+		return lookup
+
+
+def _apply_source_mtime(destination: Path, modified_ms: int) -> bool:
+		if modified_ms < 0:
+				return False
+
+		try:
+				mtime_seconds = max(0.0, modified_ms / 1000.0)
+				os.utime(destination, (mtime_seconds, mtime_seconds))
+				return True
+		except Exception:
+				return False
+
+
+def _store_uploaded_file(upload, target_dir: Path, rel_path: str, preserve_tree: bool, mtime_lookup: dict[tuple[bool, str], int] | None = None) -> dict:
 		source_name = upload.filename or "<unnamed>"
 		try:
 				safe_name = _sanitize_upload_filename(source_name, preserve_tree=preserve_tree)
@@ -286,11 +338,17 @@ def _store_uploaded_file(upload, target_dir: Path, rel_path: str, preserve_tree:
 
 				destination.parent.mkdir(parents=True, exist_ok=True)
 				upload.save(destination)
+				mtime_preserved = False
+				if mtime_lookup:
+						modified_ms = mtime_lookup.get((preserve_tree, safe_name))
+						if modified_ms is not None:
+								mtime_preserved = _apply_source_mtime(destination, modified_ms)
 				return {
 						"ok": True,
 						"source_name": source_name,
 						"saved_as": saved_rel,
 						"message": "uploaded",
+						"mtime_preserved": mtime_preserved,
 				}
 		except Exception as err:
 				return {
@@ -299,6 +357,16 @@ def _store_uploaded_file(upload, target_dir: Path, rel_path: str, preserve_tree:
 						"saved_as": "-",
 						"message": str(err),
 				}
+
+
+def _build_upload_destination(rel_path: str, requested_name: str, preserve_tree: bool) -> tuple[str, Path]:
+		safe_name = _sanitize_upload_filename(requested_name, preserve_tree=preserve_tree)
+		saved_rel = f"{rel_path}/{safe_name}" if rel_path else safe_name
+		if preserve_tree:
+				destination = _full_path(saved_rel)
+		else:
+				destination = _full_path(saved_rel)
+		return saved_rel, destination
 
 
 @app.get("/ui/login")
@@ -365,6 +433,65 @@ def ui_logoff():
 		return response
 
 
+@app.post("/ui/upload/check")
+@requires_ui_auth
+def ui_upload_check():
+		payload = request.get_json(silent=True) or {}
+		rel_path = _to_safe_rel_path(payload.get("current_path", ""))
+		target_dir = _full_path(rel_path)
+		if not target_dir.exists() or not target_dir.is_dir():
+				return jsonify({"ok": False, "summary": "Target folder not found", "conflicts": []}), 404
+
+		candidates = payload.get("files", [])
+		if not isinstance(candidates, list):
+				return jsonify({"ok": False, "summary": "Invalid payload", "conflicts": []}), 400
+
+		conflicts = []
+		for item in candidates:
+				if not isinstance(item, dict):
+						continue
+
+				requested_name = str(item.get("path", "") or "")
+				if not requested_name:
+						continue
+
+				preserve_tree = bool(item.get("preserve_tree", False))
+				try:
+						saved_rel, destination = _build_upload_destination(rel_path, requested_name, preserve_tree)
+				except Exception:
+						continue
+
+				if not destination.exists() or not destination.is_file():
+						continue
+
+				try:
+						size = int(item.get("size", -1))
+						modified_ms = int(item.get("modified_ms", -1))
+				except Exception:
+						continue
+
+				if size < 0 or modified_ms < 0:
+						continue
+
+				st = destination.stat()
+				same_size = st.st_size == size
+				same_mtime = abs(st.st_mtime - (modified_ms / 1000.0)) <= 1.0
+				conflicts.append({
+						"source_path": requested_name,
+						"saved_as": saved_rel,
+						"existing_size": st.st_size,
+						"incoming_size": size,
+						"existing_mtime": int(st.st_mtime),
+						"incoming_mtime": int(modified_ms / 1000),
+						"same_size": same_size,
+						"same_mtime": same_mtime,
+						"same_metadata": same_size and same_mtime,
+				})
+
+		summary = "No existing-name conflicts found" if not conflicts else f"Found {len(conflicts)} existing-name conflict(s)"
+		return jsonify({"ok": True, "summary": summary, "conflicts": conflicts, "count": len(conflicts)})
+
+
 @app.post("/ui/upload")
 @requires_ui_auth
 def ui_upload():
@@ -375,6 +502,7 @@ def ui_upload():
 
 		plain_files = [f for f in request.files.getlist("files") if f and f.filename]
 		folder_files = [f for f in request.files.getlist("folder_files") if f and f.filename]
+		mtime_lookup = _extract_mtime_lookup()
 		if not plain_files and not folder_files:
 				if _wants_json_upload_response():
 						return jsonify({
@@ -388,10 +516,10 @@ def ui_upload():
 
 		results = []
 		for upload in plain_files:
-				results.append(_store_uploaded_file(upload, target_dir, rel_path, preserve_tree=False))
+				results.append(_store_uploaded_file(upload, target_dir, rel_path, preserve_tree=False, mtime_lookup=mtime_lookup))
 
 		for upload in folder_files:
-				results.append(_store_uploaded_file(upload, target_dir, rel_path, preserve_tree=True))
+				results.append(_store_uploaded_file(upload, target_dir, rel_path, preserve_tree=True, mtime_lookup=mtime_lookup))
 
 		uploaded = sum(1 for r in results if r["ok"])
 		failed = sum(1 for r in results if not r["ok"])
