@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>File Versions - Flask WebDAV</title>
+	<style>
+		:root {
+			color-scheme: light;
+			font-family: "Trebuchet MS", "Segoe UI", sans-serif;
+			--bg: #f4f7fb;
+			--panel: #ffffff;
+			--ink: #16304f;
+			--muted: #55719a;
+			--line: #dce6f7;
+			--brand-1: #2f67d8;
+			--brand-2: #1ea5b7;
+		}
+		* { box-sizing: border-box; }
+		body {
+			margin: 0;
+			background: radial-gradient(circle at top left, #eef4ff 0%, var(--bg) 55%);
+			color: var(--ink);
+		}
+		.main {
+			max-width: 980px;
+			margin: 1.4rem auto;
+			padding: 0 1rem;
+		}
+		.panel {
+			background: var(--panel);
+			border: 1px solid var(--line);
+			border-radius: 14px;
+			padding: 0.95rem;
+			box-shadow: 0 10px 24px rgba(30, 56, 93, 0.08);
+		}
+		h1 {
+			margin: 0;
+			font-size: 1.22rem;
+		}
+		.meta {
+			margin-top: 0.24rem;
+			font-size: 0.88rem;
+			color: var(--muted);
+		}
+		.top-links {
+			display: flex;
+			gap: 0.65rem;
+			align-items: center;
+			margin: 0.8rem 0;
+			flex-wrap: wrap;
+		}
+		a {
+			color: #2455b3;
+			text-decoration: none;
+			font-weight: 700;
+		}
+		a:hover { text-decoration: underline; }
+		table {
+			width: 100%;
+			border-collapse: collapse;
+			font-size: 0.9rem;
+		}
+		th, td {
+			padding: 0.62rem;
+			text-align: left;
+			border-bottom: 1px solid var(--line);
+		}
+		th {
+			font-size: 0.78rem;
+			text-transform: uppercase;
+			letter-spacing: 0.03em;
+			color: var(--muted);
+		}
+		button {
+			padding: 0.45rem 0.68rem;
+			border: 0;
+			border-radius: 8px;
+			background: linear-gradient(120deg, var(--brand-1), var(--brand-2));
+			color: #fff;
+			font-weight: 700;
+			cursor: pointer;
+		}
+		.row-actions {
+			display: inline-flex;
+			align-items: center;
+			gap: 0.5rem;
+			flex-wrap: wrap;
+		}
+		.empty {
+			padding: 0.85rem;
+			border: 1px dashed var(--line);
+			border-radius: 10px;
+			color: var(--muted);
+			background: #f8fbff;
+		}
+		@media (max-width: 760px) {
+			table, tbody, tr, td {
+				display: block;
+				width: 100%;
+			}
+			thead { display: none; }
+			tr {
+				border-bottom: 1px solid var(--line);
+				padding: 0.42rem 0;
+			}
+			td {
+				display: flex;
+				justify-content: space-between;
+				gap: 0.65rem;
+				align-items: center;
+				border: 0;
+				padding: 0.32rem 0.2rem;
+			}
+			td::before {
+				content: attr(data-label);
+				font-size: 0.72rem;
+				text-transform: uppercase;
+				font-weight: 700;
+				color: var(--muted);
+				min-width: 78px;
+			}
+		}
+	</style>
+</head>
+<body>
+	<main class="main">
+		<div class="panel">
+			<h1>Versions for {{ file_name }}</h1>
+			<div class="meta">File path: /{{ file_rel_path }}</div>
+			<div class="top-links">
+				<a href="{{ url_for('ui_list', subpath=current_path) }}">Back to files</a>
+				<a href="{{ url_for('ui_download', file_path=file_rel_path) }}">Download current file</a>
+			</div>
+
+			{% if versions %}
+				<table>
+					<thead>
+						<tr>
+							<th>Version</th>
+							<th>Created</th>
+							<th>Size</th>
+							<th>Reason</th>
+							<th>Action</th>
+						</tr>
+					</thead>
+					<tbody>
+						{% for v in versions %}
+							<tr>
+								<td data-label="Version">{{ v.id }}</td>
+								<td data-label="Created">{{ v.mtime }}</td>
+								<td data-label="Size">{{ v.size }}</td>
+								<td data-label="Reason">{{ v.reason }}</td>
+								<td data-label="Action">
+									<div class="row-actions">
+										<a href="{{ url_for('ui_download_version', file_path=file_rel_path, version_id=v.id) }}">Download</a>
+										<form action="{{ url_for('ui_restore_version') }}" method="post">
+											<input type="hidden" name="file_rel_path" value="{{ file_rel_path }}">
+											<input type="hidden" name="version_id" value="{{ v.id }}">
+											<button type="submit">Restore</button>
+										</form>
+									</div>
+								</td>
+							</tr>
+						{% endfor %}
+					</tbody>
+				</table>
+			{% else %}
+				<div class="empty">No saved versions yet. A version is created automatically before overwrite or delete.</div>
+			{% endif %}
+		</div>
+	</main>
+</body>
+</html>

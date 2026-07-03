@@ -197,6 +197,48 @@
 			font-size: 0.97rem;
 			font-weight: 800;
 		}
+		.pathbar {
+			display: flex;
+			align-items: center;
+			gap: 0.2rem;
+			flex-wrap: wrap;
+			font-size: 0.93rem;
+			line-height: 1.35;
+		}
+		.pathbar a {
+			text-decoration: none;
+			font-weight: 800;
+			color: #1f4f9f;
+			padding: 0.08rem 0.16rem;
+			border-radius: 6px;
+		}
+		.pathbar a:hover {
+			background: #e6efff;
+			text-decoration: underline;
+		}
+		.pathbar .sep {
+			color: #7f95b8;
+			font-weight: 700;
+		}
+		.pathbar .current {
+			color: var(--ink);
+			font-weight: 800;
+			padding: 0.08rem 0.16rem;
+			border-radius: 6px;
+			background: #eaf2ff;
+		}
+		:root[data-theme="dark"] .pathbar a {
+			color: #9dc0ff;
+		}
+		:root[data-theme="dark"] .pathbar a:hover {
+			background: #2a3d59;
+		}
+		:root[data-theme="dark"] .pathbar .sep {
+			color: #9ab0d2;
+		}
+		:root[data-theme="dark"] .pathbar .current {
+			background: #293b59;
+		}
 		.files {
 			width: 100%;
 			border-collapse: collapse;
@@ -395,6 +437,49 @@
 			.app {
 				grid-template-columns: 1fr;
 			}
+			.files thead {
+				display: none;
+			}
+			.files,
+			.files tbody,
+			.files tr,
+			.files td {
+				display: block;
+				width: 100%;
+			}
+			.files tr {
+				padding: 0.35rem 0;
+				border-bottom: 1px solid #ebf1fc;
+			}
+			:root[data-theme="dark"] .files tr {
+				border-bottom-color: #30435f;
+			}
+			.files td {
+				display: flex;
+				align-items: flex-start;
+				justify-content: space-between;
+				gap: 0.7rem;
+				padding: 0.28rem 0.62rem;
+				border: 0;
+			}
+			.files td::before {
+				content: attr(data-label);
+				font-size: 0.71rem;
+				letter-spacing: 0.02em;
+				text-transform: uppercase;
+				color: #667ea5;
+				font-weight: 700;
+				min-width: 72px;
+			}
+			:root[data-theme="dark"] .files td::before {
+				color: #a8bbd8;
+			}
+			.files td:first-child {
+				padding-top: 0.5rem;
+			}
+			.files td:last-child {
+				padding-bottom: 0.6rem;
+			}
 			.sidebar {
 				padding: 0.8rem;
 				gap: 0.6rem;
@@ -409,6 +494,20 @@
 				height: auto;
 				padding: 0.75rem 0.85rem;
 				flex-wrap: wrap;
+			}
+			.row-actions {
+				display: flex;
+				justify-content: flex-end;
+				align-items: center;
+				gap: 0.45rem;
+				flex-wrap: wrap;
+				white-space: normal;
+			}
+			.row-actions form {
+				display: inline-flex;
+			}
+			.row-actions .delete-btn {
+				margin-left: 0;
 			}
 		}
 	</style>
@@ -443,7 +542,18 @@
 
 			<div class="canvas">
 				<section class="panel">
-					<div class="panel-title">Files & Folders</div>
+					<div class="panel-title">
+						<div class="pathbar" aria-label="Current path">
+							{% for crumb in breadcrumbs %}
+								{% if loop.last %}
+									<span class="current">{{ crumb.name }}</span>
+								{% else %}
+									<a href="{{ url_for('ui_list', subpath=crumb.path) }}">{{ crumb.name }}</a>
+									<span class="sep">/</span>
+								{% endif %}
+							{% endfor %}
+						</div>
+					</div>
 					<table class="files">
 						<thead>
 							<tr>
@@ -457,30 +567,31 @@
 						<tbody>
 							{% if parent_path is not none %}
 								<tr>
-									<td><a href="{{ url_for('ui_list', subpath=parent_path) }}">.. (parent)</a></td>
-									<td><span class="pill">dir</span></td>
-									<td>-</td>
-									<td>-</td>
-									<td>-</td>
+									<td data-label="Name"><a href="{{ url_for('ui_list', subpath=parent_path) }}">.. (parent)</a></td>
+									<td data-label="Type"><span class="pill">dir</span></td>
+									<td data-label="Size">-</td>
+									<td data-label="Modified">-</td>
+									<td data-label="Actions">-</td>
 								</tr>
 							{% endif %}
 							{% for e in entries %}
 								<tr>
 									{% if e.is_dir %}
-										<td><a href="{{ url_for('ui_list', subpath=e.rel_path) }}">{{ e.name }}</a></td>
-										<td><span class="pill">dir</span></td>
-										<td>-</td>
+										<td data-label="Name"><a href="{{ url_for('ui_list', subpath=e.rel_path) }}">{{ e.name }}</a></td>
+										<td data-label="Type"><span class="pill">dir</span></td>
+										<td data-label="Size">-</td>
 									{% else %}
-										<td>{{ e.name }}</td>
-										<td>file</td>
-										<td>{{ e.size }}</td>
+										<td data-label="Name">{{ e.name }}</td>
+										<td data-label="Type">file</td>
+										<td data-label="Size">{{ e.size }}</td>
 									{% endif %}
-									<td>{{ e.mtime }}</td>
-									<td class="row-actions">
+									<td data-label="Modified">{{ e.mtime }}</td>
+									<td data-label="Actions" class="row-actions">
 										{% if e.is_dir %}
 											<a href="{{ url_for('ui_download_folder', folder_path=e.rel_path) }}">download zip</a>
 										{% else %}
 											<a href="{{ url_for('ui_download', file_path=e.rel_path) }}">download</a>
+											<a href="{{ url_for('ui_versions', file_path=e.rel_path) }}">versions</a>
 										{% endif %}
 										<form action="{{ url_for('ui_delete') }}" method="post">
 											<input type="hidden" name="target" value="{{ e.rel_path }}">
