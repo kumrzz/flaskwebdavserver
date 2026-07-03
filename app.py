@@ -32,6 +32,7 @@ AMPACHE_SESSION_TTL_SECONDS = 12 * 60 * 60
 AMPACHE_API_VERSION = "6.0.0"
 AMPACHE_AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".opus"}
 AMPACHE_SESSIONS = {}
+AMPACHE_ROUTE_PATHS = {"/server/xml.server.php", "/ampache/server/xml.server.php"}
 VERSION_DIR_NAME = "versions"
 LEGACY_VERSION_DIR_NAME = ".versions"
 MAX_VERSIONS_PER_FILE = 500
@@ -216,6 +217,8 @@ def _ampache_songs_xml(entries: list[dict]) -> Response:
 def requires_auth(fn):
 		@wraps(fn)
 		def wrapper(*args, **kwargs):
+				if request.path in AMPACHE_ROUTE_PATHS:
+						return fn(*args, **kwargs)
 				if not _check_basic_auth():
 						return _auth_failed()
 				return fn(*args, **kwargs)
@@ -480,6 +483,15 @@ def _snapshot_file_version(file_rel_path: str, reason: str) -> None:
 		_prune_versions(bucket)
 
 
+def _try_snapshot_file_version(file_rel_path: str, reason: str) -> bool:
+		try:
+				_snapshot_file_version(file_rel_path, reason)
+				return True
+		except Exception as err:
+				app.logger.warning("Version snapshot skipped for %s (%s): %s", file_rel_path, reason, err)
+				return False
+
+
 def _list_file_versions(file_rel_path: str) -> list[dict]:
 		bucket = _version_bucket(file_rel_path)
 		if not bucket.exists() or not bucket.is_dir():
@@ -521,7 +533,7 @@ def _restore_file_version(file_rel_path: str, version_id: str) -> None:
 		target = _full_path(file_rel_path)
 		target.parent.mkdir(parents=True, exist_ok=True)
 		if target.exists() and target.is_file():
-				_snapshot_file_version(file_rel_path, "restore")
+				_try_snapshot_file_version(file_rel_path, "restore")
 		shutil.copy2(version_file, target)
 
 
@@ -555,7 +567,7 @@ def _store_uploaded_file(upload, target_dir: Path, rel_path: str, preserve_tree:
 						destination = target_dir / safe_name
 
 				if destination.exists() and destination.is_file():
-						_snapshot_file_version(saved_rel, "upload")
+						_try_snapshot_file_version(saved_rel, "upload")
 
 				destination.parent.mkdir(parents=True, exist_ok=True)
 				upload.save(destination)
@@ -794,7 +806,7 @@ def ui_delete():
 		if not target.exists():
 				abort(404)
 		if target.is_file():
-				_snapshot_file_version(target_rel, "delete")
+				_try_snapshot_file_version(target_rel, "delete")
 		_delete_path(target)
 		return redirect(url_for("ui_list", subpath=current_rel))
 
@@ -872,6 +884,9 @@ def webdav(req_path: str):
 		target = _full_path(rel_path)
 		method = request.method.upper()
 
+		if request.path in AMPACHE_ROUTE_PATHS and method in ("GET", "HEAD"):
+				return ampache_api()
+
 		if method == "OPTIONS":
 				response = Response(status=200)
 				response.headers["DAV"] = "1,2"
@@ -892,7 +907,7 @@ def webdav(req_path: str):
 
 		if method == "PUT":
 				if target.exists() and target.is_file():
-						_snapshot_file_version(rel_path, "put")
+						_try_snapshot_file_version(rel_path, "put")
 				target.parent.mkdir(parents=True, exist_ok=True)
 				with target.open("wb") as out:
 						out.write(request.get_data())
@@ -902,7 +917,7 @@ def webdav(req_path: str):
 				if not target.exists():
 						return Response(status=404)
 				if target.is_file():
-						_snapshot_file_version(rel_path, "delete")
+						_try_snapshot_file_version(rel_path, "delete")
 				_delete_path(target)
 				return Response(status=204)
 
@@ -922,7 +937,7 @@ def webdav(req_path: str):
 						if not overwrite:
 								return Response(status=412)
 						if dest_path.is_file():
-								_snapshot_file_version(dest_rel, method.lower())
+								_try_snapshot_file_version(dest_rel, method.lower())
 						_delete_path(dest_path)
 
 				if not dest_path.parent.exists():
