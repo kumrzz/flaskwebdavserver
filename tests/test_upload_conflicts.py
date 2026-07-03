@@ -1,13 +1,19 @@
+<<<<<<< HEAD
 import base64
+=======
+>>>>>>> origin/main
 import io
 import json
 import os
 import sys
 import time
 from pathlib import Path
+<<<<<<< HEAD
 import hashlib
 from email.utils import parsedate_to_datetime
 from xml.etree import ElementTree as ET
+=======
+>>>>>>> origin/main
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
