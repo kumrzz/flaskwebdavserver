@@ -1,5 +1,6 @@
 import base64
 import datetime as dt
+import hashlib
 import io
 import json
 import mimetypes
@@ -9,6 +10,7 @@ import secrets
 import shutil
 import time
 import urllib.parse
+import uuid
 import zipfile
 from functools import wraps
 from pathlib import Path
@@ -26,6 +28,10 @@ AUTH_PASS = os.environ.get("WEBDAV_PASSWORD", "pass")
 UI_SESSION_COOKIE = "ui_session"
 UI_SESSION_TTL_SECONDS = 12 * 60 * 60
 UI_SESSIONS = {}
+AMPACHE_SESSION_TTL_SECONDS = 12 * 60 * 60
+AMPACHE_API_VERSION = "6.0.0"
+AMPACHE_AUDIO_EXTS = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav", ".opus"}
+AMPACHE_SESSIONS = {}
 
 DATA_ROOT.mkdir(parents=True, exist_ok=True)
 def _auth_failed(message: str = "Authentication required", realm: str = "Flask-WebDAV") -> Response:
@@ -95,6 +101,93 @@ def _set_ui_cookie(response: Response, token: str) -> Response:
 def _clear_ui_cookie(response: Response) -> Response:
 		response.delete_cookie(UI_SESSION_COOKIE)
 		return response
+
+
+def _cleanup_ampache_sessions() -> None:
+		now = int(time.time())
+		expired = [token for token, payload in AMPACHE_SESSIONS.items() if payload.get("expires_at", 0) <= now]
+		for token in expired:
+				AMPACHE_SESSIONS.pop(token, None)
+
+
+def _verify_ampache_handshake(user: str, timestamp: str, auth: str) -> bool:
+		if not user or user != AUTH_USER:
+				return False
+		if not auth:
+				return False
+
+		auth_lower = auth.lower()
+		candidates = {
+				hashlib.sha256((timestamp + AUTH_PASS).encode("utf-8")).hexdigest(),
+				hashlib.sha256((AUTH_PASS + timestamp).encode("utf-8")).hexdigest(),
+				hashlib.sha256(AUTH_PASS.encode("utf-8")).hexdigest(),
+		}
+		return auth_lower in candidates
+
+
+def _create_ampache_session(user: str) -> str:
+		_cleanup_ampache_sessions()
+		token = uuid.uuid4().hex
+		AMPACHE_SESSIONS[token] = {
+				"username": user,
+				"expires_at": int(time.time()) + AMPACHE_SESSION_TTL_SECONDS,
+		}
+		return token
+
+
+def _validate_ampache_session(token: str) -> bool:
+		_cleanup_ampache_sessions()
+		if not token:
+				return False
+		return token in AMPACHE_SESSIONS
+
+
+def _ampache_media_entries() -> list[dict]:
+		entries = []
+		song_id = 1
+		for path in sorted(DATA_ROOT.rglob("*")):
+				if not path.is_file() or path.suffix.lower() not in AMPACHE_AUDIO_EXTS:
+						continue
+				rel_path = str(path.relative_to(DATA_ROOT)).replace(os.sep, "/")
+				entries.append({
+						"id": str(song_id),
+						"title": path.stem,
+						"rel_path": rel_path,
+						"size": str(path.stat().st_size),
+				})
+				song_id += 1
+		return entries
+
+
+def _ampache_error_xml(message: str) -> Response:
+		root = Element("root")
+		error = SubElement(root, "error")
+		error.text = message
+		xml_body = tostring(root, encoding="utf-8", xml_declaration=True)
+		return Response(xml_body, status=200, content_type="application/xml; charset=utf-8")
+
+
+def _ampache_simple_xml(values: dict[str, str]) -> Response:
+		root = Element("root")
+		for key, value in values.items():
+			node = SubElement(root, key)
+			node.text = value
+		xml_body = tostring(root, encoding="utf-8", xml_declaration=True)
+		return Response(xml_body, status=200, content_type="application/xml; charset=utf-8")
+
+
+def _ampache_songs_xml(entries: list[dict]) -> Response:
+		root = Element("root")
+		for entry in entries:
+			song = SubElement(root, "song", id=entry["id"])
+			title = SubElement(song, "title")
+			title.text = entry["title"]
+			url = SubElement(song, "url")
+			url.text = request.url_root.rstrip("/") + "/" + urllib.parse.quote(entry["rel_path"])
+			size = SubElement(song, "size")
+			size.text = entry["size"]
+		xml_body = tostring(root, encoding="utf-8", xml_declaration=True)
+		return Response(xml_body, status=200, content_type="application/xml; charset=utf-8")
 
 
 def requires_auth(fn):
@@ -668,6 +761,52 @@ def webdav(req_path: str):
 @app.get("/healthz")
 def healthz():
 		return {"status": "ok", "data_root": str(DATA_ROOT)}
+
+
+@app.get("/server/xml.server.php")
+@app.get("/ampache/server/xml.server.php")
+def ampache_api():
+		action = request.args.get("action", "")
+
+		if action == "handshake":
+			timestamp = request.args.get("timestamp", "")
+			auth = request.args.get("auth", "")
+			user = request.args.get("user", "")
+			if not _verify_ampache_handshake(user=user, timestamp=timestamp, auth=auth):
+					return _ampache_error_xml("Invalid Ampache handshake")
+
+			token = _create_ampache_session(user)
+			return _ampache_simple_xml({
+					"auth": token,
+					"api": AMPACHE_API_VERSION,
+					"session_expire": str(AMPACHE_SESSION_TTL_SECONDS),
+					"update": "0",
+					"add": "0",
+					"clean": "0",
+			})
+
+		auth_token = request.args.get("auth", "")
+		if not _validate_ampache_session(auth_token):
+				return _ampache_error_xml("Invalid Ampache session")
+
+		if action == "ping":
+			return _ampache_simple_xml({
+					"ping": "1",
+					"session_expire": str(AMPACHE_SESSION_TTL_SECONDS),
+					"api": AMPACHE_API_VERSION,
+			})
+
+		if action in ("songs", "song"):
+			entries = _ampache_media_entries()
+			offset = int(request.args.get("offset", "0") or "0")
+			limit = int(request.args.get("limit", "250") or "250")
+			sliced = entries[offset:offset + max(0, limit)]
+			return _ampache_songs_xml(sliced)
+
+		if action in ("artists", "albums", "playlists"):
+			return _ampache_simple_xml({"total_count": "0"})
+
+		return _ampache_error_xml("Unsupported Ampache action")
 
 
 if __name__ == "__main__":

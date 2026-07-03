@@ -4,6 +4,8 @@ import os
 import sys
 import time
 from pathlib import Path
+import hashlib
+from xml.etree import ElementTree as ET
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -183,3 +185,43 @@ def test_upload_preserves_mtime_from_source_payload(tmp_path):
     uploaded = tmp_path / "mt-preserve.txt"
     assert uploaded.exists()
     assert abs(uploaded.stat().st_mtime - (target_mtime_ms / 1000.0)) <= 1.0
+
+
+def test_ampache_handshake_and_ping(tmp_path):
+    app_module.DATA_ROOT = tmp_path
+    app_module.DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    app_module.UI_SESSIONS.clear()
+    app_module.AMPACHE_SESSIONS.clear()
+    app_module.app.config["TESTING"] = True
+
+    timestamp = str(int(time.time()))
+    auth = hashlib.sha256((timestamp + app_module.AUTH_PASS).encode("utf-8")).hexdigest()
+
+    with app_module.app.test_client() as client:
+        handshake = client.get(
+            "/server/xml.server.php",
+            query_string={
+                "action": "handshake",
+                "timestamp": timestamp,
+                "auth": auth,
+                "user": app_module.AUTH_USER,
+                "version": "6.0.0",
+            },
+        )
+
+        assert handshake.status_code == 200
+        root = ET.fromstring(handshake.data)
+        token = root.findtext("auth")
+        assert token
+
+        ping = client.get(
+            "/server/xml.server.php",
+            query_string={
+                "action": "ping",
+                "auth": token,
+            },
+        )
+
+    assert ping.status_code == 200
+    ping_root = ET.fromstring(ping.data)
+    assert ping_root.findtext("ping") == "1"
